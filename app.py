@@ -1,157 +1,123 @@
 import streamlit as st
-import requests
 import pandas as pd
-from datetime import datetime, timedelta
+import numpy as np
+import requests
+from datetime import datetime
 
-BASE_URL = "https://api.balldontlie.io/v1"
+st.set_page_config(page_title="DoeBoyEnigma CS2 + NBA Edge", layout="wide")
+st.title("CS2 + NBA Prop Crusher")
+st.sidebar.success("REAL HLTV + NBA DATA — LIVE")
 
-# ---------------------------
-# PAGE CONFIG
-# ---------------------------
-st.set_page_config(page_title="NBA Stats Tool", page_icon="🏀", layout="wide")
-
-st.title("🏀 NBA Stats & Research Tool")
-st.caption("Uses the FREE Balldontlie API — with optional API key support")
-
-st.divider()
-
-# ---------------------------
-# SIDEBAR — OPTIONAL API KEY
-# ---------------------------
-st.sidebar.header("API Settings")
-
-api_key = st.sidebar.text_input("Balldontlie API Key (optional)", type="password")
-
-headers = {"Authorization": api_key} if api_key else {}
-
-
-# ---------------------------
-# SAFE API REQUEST WRAPPER
-# ---------------------------
-def safe_get(url):
-    """Safely request JSON without crashing."""
+# === REAL CS2 DATA FROM HLTV (no API key needed) ===
+@st.cache_data(ttl=3600)
+def get_cs2_data():
+    url = "https://raw.githubusercontent.com/doeboyenigma/cs2-hltv-data/main/hltv_player_series_stats.csv"
     try:
-        r = requests.get(url, headers=headers, timeout=10)
-        if r.status_code != 200:
-            return None
-        try:
-            return r.json()
-        except:
-            return None
+        df = pd.read_csv(url)
+        df['DATE'] = pd.to_datetime(df['DATE'])
+        return df.sort_values(['PLAYER', 'DATE'], ascending=[True, False])
     except:
-        return None
+        st.error("CS2 data loading — using backup")
+        return pd.read_csv("https://raw.githubusercontent.com/doeboyenigma/prop-predictor/main/backup_cs2.csv")
 
+# === REAL NBA DATA FROM NBA_API (public) ===
+@st.cache_data(ttl=3600)
+def get_nba_data():
+    try:
+        from nba_api.stats.endpoints import playergamelog
+        from nba_api.stats.static import players
+        all_logs = []
+        top_players = ["LeBron James", "Stephen Curry", "Luka Doncic", "Nikola Jokic", "Jayson Tatum", "Devin Booker", "Anthony Davis"]
+        for name in top_players:
+            player = players.find_players_by_full_name(name)[0]
+            log = playergamelog.PlayerGameLog(player_id=player['id'], season='2024').get_data_frames()[0]
+            log['PLAYER'] = name
+            log['DATE'] = pd.to_datetime(log['GAME_DATE'])
+            log = log[['DATE', 'PLAYER', 'MATCHUP', 'PTS', 'REB', 'AST']]
+            log['OPPONENT'] = log['MATCHUP'].apply(lambda x: x[-3:])
+            all_logs.append(log)
+        return pd.concat(all_logs).sort_values('DATE', ascending=False)
+    except:
+        st.error("NBA loading — using backup")
+        return pd.read_csv("https://raw.githubusercontent.com/doeboyenigma/prop-predictor/main/backup_nba.csv")
 
-# ---------------------------
-# API FUNCTIONS
-# ---------------------------
-def get_today_games():
-    today = datetime.today().strftime("%Y-%m-%d")
-    url = f"{BASE_URL}/games?dates[]={today}&per_page=100"
-    data = safe_get(url)
-    return data.get("data", []) if data else None
+cs2_df = get_cs2_data()
+nba_df = get_nba_data()
 
-def get_yesterday_games():
-    yesterday = (datetime.today() - timedelta(days=1)).strftime("%Y-%m-%d")
-    url = f"{BASE_URL}/games?dates[]={yesterday}&per_page=100"
-    data = safe_get(url)
-    return data.get("data", []) if data else None
+# Sport selector
+sport = st.sidebar.selectbox("Sport", ["CS2", "NBA"])
 
-def search_player(name):
-    url = f"{BASE_URL}/players?search={name}&per_page=50"
-    data = safe_get(url)
-    return data.get("data", []) if data else None
+if sport == "CS2":
+    df = cs2_df
+    players = sorted(df['PLAYER'].unique())
+    player = st.sidebar.selectbox("Player", players)
+    player_data = df[df['PLAYER'] == player].copy()
+    
+    st.sidebar.write(f"**Role:** {player_data['ROLE'].iloc[0]}")
+    st.sidebar.write(f"**Team:** {player_data['TEAM'].iloc[0]}")
+    
+    stat = st.sidebar.selectbox("Stat", ["KILLS", "HEADSHOTS", "HS_PCT", "ASSISTS", "K/D"])
+    window = st.sidebar.selectbox("Last X Series", ["3", "5", "8", "10", "All"])
+    opponent = st.sidebar.text_input("vs Opponent (H2H)", "")
+    
+    n = int(window) if window != "All" else len(player_data)
+    recent = player_data.head(n)
+    
+    if opponent:
+        h2h = recent[recent['OPPONENT'].str.contains(opponent, case=False, na=False)]
+        if not h2h.empty:
+            st.sidebar.success(f"Last vs {opponent}: {h2h[stat].iloc[0]:.1f}")
+        recent = h2h if not h2h.empty else recent
+    
+    avg = round(recent[stat].mean(), 2)
+    projection = round(avg * 1.04, 2)  # slight boost for form
+    
+    line = st.number_input("PrizePicks Line", value=20.5, step=0.5)
+    edge = projection - line
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric(f"Last {n} Series Avg", avg)
+    col2.metric("Projection", projection, f"{edge:+.2f}")
+    col3.metric("Edge", line, "MORE" if edge > 1 else "LESS" if edge < -1 else "Pass")
+    
+    with st.expander("Last Series"):
+        show = recent[['DATE', 'OPPONENT', 'MAPS', 'KILLS', 'HEADSHOTS', 'HS_PCT']].head(10)
+        show['DATE'] = show['DATE'].dt.strftime("%m-%d")
+        st.dataframe(show)
 
-def get_player_season_averages(pid, season=2024):
-    url = f"{BASE_URL}/season_averages?season={season}&player_ids[]={pid}"
-    data = safe_get(url)
-    stats = data.get("data", []) if data else None
-    return stats[0] if stats else None
+elif sport == "NBA":
+    df = nba_df
+    player = st.sidebar.selectbox("Player", sorted(df['PLAYER'].unique()))
+    player_data = df[df['PLAYER'] == player].copy()
+    
+    stat = st.sidebar.selectbox("Stat", ["PTS", "REB", "AST"])
+    window = st.sidebar.selectbox("Last X Games", ["5", "10", "20", "Season"])
+    opponent = st.sidebar.text_input("vs Opponent", "")
+    
+    n = int(window.split()[-1]) if "Season" not in window else len(player_data)
+    recent = player_data.head(n)
+    
+    if opponent:
+        h2h = recent[recent['OPPONENT'] == opponent]
+        if not h2h.empty:
+            st.sidebar.success(f"Last vs {opponent}: {h2h[stat].iloc[0]}")
+        recent = h2h if not h2h.empty else recent
+    
+    avg = round(recent[stat].mean(), 2)
+    projection = round(avg * 1.03, 2)
+    
+    line = st.number_input("Line", value=25.5, step=0.5)
+    edge = projection - line
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric(f"Last {n} Avg", avg)
+    col2.metric("Projection", projection, f"{edge:+.2f}")
+    col3.metric("Pick", line, "MORE" if edge > 0.8 else "LESS")
+    
+    with st.expander("Last Games"):
+        show = recent[['DATE', 'OPPONENT', stat]].head(10)
+        show['DATE'] = pd.to_datetime(show['DATE']).dt.strftime("%m-%d")
+        st.dataframe(show)
 
-
-# ---------------------------
-# TODAY'S GAMES SECTION
-# ---------------------------
-st.subheader("📅 Today's Games")
-
-today_games = get_today_games()
-
-if today_games is None:
-    st.error("Unable to load today's games. The API may require a key or is unavailable.")
-elif today_games == []:
-    st.info("No NBA games today.")
-else:
-    for g in today_games:
-        st.write(
-            f"**{g['visitor_team']['full_name']} @ {g['home_team']['full_name']}**  "
-            f" — Status: {g['status']}"
-        )
-
-
-# ---------------------------
-# YESTERDAY'S SCORES SECTION
-# ---------------------------
-st.subheader("🕒 Yesterday's Results")
-
-y_games = get_yesterday_games()
-
-if y_games is None:
-    st.error("Unable to load yesterday's games. The API may require a key or is unavailable.")
-elif y_games == []:
-    st.info("No NBA games yesterday.")
-else:
-    for g in y_games:
-        st.write(
-            f"**{g['visitor_team']['full_name']} @ {g['home_team']['full_name']}**  \n"
-            f"{g['visitor_team']['abbreviation']}: {g['visitor_team_score']}  —  "
-            f"{g['home_team']['abbreviation']}: {g['home_team_score']}"
-        )
-
-
-st.divider()
-
-# ---------------------------
-# PLAYER SEARCH SECTION
-# ---------------------------
-st.subheader("🔍 Search Player — Season Averages")
-
-player_name = st.text_input("Player name (ex: Curry, LeBron, Tatum)")
-
-if player_name:
-    players = search_player(player_name)
-
-    if players is None:
-        st.error("Unable to search players. API unreachable or key required.")
-    elif players == []:
-        st.warning("No matching players found.")
-    else:
-        player = players[0]
-
-        fullname = f"{player['first_name']} {player['last_name']}"
-        team = player["team"]["full_name"]
-
-        st.success(f"Found: **{fullname}** — {team}")
-
-        stats = get_player_season_averages(player["id"])
-
-        if not stats:
-            st.warning("No season averages available.")
-        else:
-            # Clean Metrics UI
-            c1, c2, c3 = st.columns(3)
-
-            with c1:
-                st.metric("PPG", round(stats.get("pts", 0), 1))
-                st.metric("RPG", round(stats.get("reb", 0), 1))
-                st.metric("APG", round(stats.get("ast", 0), 1))
-
-            with c2:
-                st.metric("FG%", f"{round(stats.get('fg_pct', 0) * 100, 1)}%")
-                st.metric("3P%", f"{round(stats.get('fg3_pct', 0) * 100, 1)}%")
-                st.metric("FT%", f"{round(stats.get('ft_pct', 0) * 100, 1)}%")
-
-            with c3:
-                st.metric("STL", stats.get("stl", 0))
-                st.metric("BLK", stats.get("blk", 0))
-                st.metric("TOV", stats.get("turnover", 0))
+st.balloons()
 
