@@ -6,27 +6,46 @@ from datetime import datetime, timedelta
 BASE_URL = "https://api.balldontlie.io/v1"
 
 # ---------------------------
+# SAFE REQUEST WRAPPER
+# ---------------------------
+
+def safe_get(url):
+    """Safely request JSON without crashing."""
+    try:
+        r = requests.get(url, timeout=8)
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except:
+        return None
+
+
+# ---------------------------
 # API FUNCTIONS
 # ---------------------------
 
 def get_today_games():
     today = datetime.today().strftime("%Y-%m-%d")
     url = f"{BASE_URL}/games?dates[]={today}&per_page=100"
-    return requests.get(url).json().get("data", [])
+    data = safe_get(url)
+    return data.get("data", []) if data else None
 
 def get_yesterday_games():
     yesterday = (datetime.today() - timedelta(days=1)).strftime("%Y-%m-%d")
     url = f"{BASE_URL}/games?dates[]={yesterday}&per_page=100"
-    return requests.get(url).json().get("data", [])
+    data = safe_get(url)
+    return data.get("data", []) if data else None
 
 def search_player(name):
     url = f"{BASE_URL}/players?search={name}&per_page=50"
-    return requests.get(url).json().get("data", [])
+    data = safe_get(url)
+    return data.get("data", []) if data else None
 
 def get_player_season_averages(player_id, season=2025):
     url = f"{BASE_URL}/season_averages?season={season}&player_ids[]={player_id}"
-    data = requests.get(url).json().get("data", [])
-    return data[0] if data else None
+    data = safe_get(url)
+    stats = data.get("data", []) if data else None
+    return stats[0] if stats else None
 
 
 # ---------------------------
@@ -70,7 +89,10 @@ st.markdown("<div class='sub-title'>Live games • Yesterday's scores • Free p
 st.markdown("<div class='section-header'>📅 Today's Games</div>", unsafe_allow_html=True)
 
 today_games = get_today_games()
-if not today_games:
+
+if today_games is None:
+    st.error("API Error: Could not load today's games.")
+elif today_games == []:
     st.info("No NBA games today.")
 else:
     for g in today_games:
@@ -89,7 +111,10 @@ else:
 st.markdown("<div class='section-header'>🕒 Yesterday's Scores</div>", unsafe_allow_html=True)
 
 y_games = get_yesterday_games()
-if not y_games:
+
+if y_games is None:
+    st.error("API Error: Could not load yesterday's games.")
+elif y_games == []:
     st.info("No games yesterday.")
 else:
     for g in y_games:
@@ -113,8 +138,10 @@ player_name = st.text_input("Search for a player (ex: Luka Doncic, Curry, Tatum)
 if player_name:
     results = search_player(player_name)
 
-    if not results:
-        st.error("No players found.")
+    if results is None:
+        st.error("API Error: Could not search for players.")
+    elif results == []:
+        st.error("No matching players found.")
     else:
         player = results[0]
         full_name = f"{player['first_name']} {player['last_name']}"
@@ -128,7 +155,7 @@ if player_name:
             st.warning("Season averages not available for this player.")
         else:
 
-            # Format stats into 3 clean columns
+            # 3-column clean stat layout
             c1, c2, c3 = st.columns(3)
 
             with c1:
@@ -145,5 +172,4 @@ if player_name:
                 st.metric("STL", stats.get("stl", 0))
                 st.metric("BLK", stats.get("blk", 0))
                 st.metric("TOV", stats.get("turnover", 0))
-
 
